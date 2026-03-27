@@ -99,19 +99,25 @@ export default function CalendarPage() {
   const [blockReason, setBlockReason] = useState('')
 
   // Drag-to-select state
+  // Mouse: immediate drag. Touch: long-press (500ms) then drag.
+  const LONG_PRESS_MS = 500
+  const SNAP_MINUTES = 15
+
   const dragRef = useRef<{
     active: boolean
     date: Date
     startY: number
     columnTop: number
   } | null>(null)
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const touchStartPos = useRef<{ x: number; y: number } | null>(null)
+
   const [dragPreview, setDragPreview] = useState<{
     date: string // ISO
     topMin: number // minutes from WORK_START
     bottomMin: number
   } | null>(null)
 
-  const SNAP_MINUTES = 15
   const yToMinutes = (y: number, columnTop: number) => {
     const rawMin = ((y - columnTop) / HOUR_HEIGHT) * 60
     return Math.round(rawMin / SNAP_MINUTES) * SNAP_MINUTES
@@ -124,21 +130,18 @@ export default function CalendarPage() {
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
   }
 
-  const handleDragStart = (e: React.MouseEvent | React.TouchEvent, date: Date) => {
-    // Don't start drag on appointment clicks
-    if ((e.target as HTMLElement).closest('[data-apt]')) return
-    const column = (e.currentTarget as HTMLElement)
-    const rect = column.getBoundingClientRect()
-    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY
-    const min = yToMinutes(clientY, rect.top)
-    const clampedMin = Math.max(0, Math.min(min, (WORK_END - WORK_START) * 60 - SNAP_MINUTES))
-
-    dragRef.current = {
-      active: true,
-      date,
-      startY: clampedMin,
-      columnTop: rect.top,
+  const cancelLongPress = () => {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current)
+      longPressTimer.current = null
     }
+    touchStartPos.current = null
+  }
+
+  const activateDrag = (date: Date, clientY: number, columnTop: number) => {
+    const min = yToMinutes(clientY, columnTop)
+    const clampedMin = Math.max(0, Math.min(min, (WORK_END - WORK_START) * 60 - SNAP_MINUTES))
+    dragRef.current = { active: true, date, startY: clampedMin, columnTop }
     setDragPreview({
       date: date.toISOString(),
       topMin: clampedMin,
@@ -146,8 +149,44 @@ export default function CalendarPage() {
     })
   }
 
+  // Mouse: start drag immediately
+  const handleMouseDown = (e: React.MouseEvent, date: Date) => {
+    if ((e.target as HTMLElement).closest('[data-apt]')) return
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    activateDrag(date, e.clientY, rect.top)
+  }
+
+  // Touch: start long-press timer, activate drag after hold
+  const handleTouchStart = (e: React.TouchEvent, date: Date) => {
+    if ((e.target as HTMLElement).closest('[data-apt]')) return
+    const touch = e.touches[0]
+    const column = e.currentTarget as HTMLElement
+    const rect = column.getBoundingClientRect()
+    touchStartPos.current = { x: touch.clientX, y: touch.clientY }
+
+    longPressTimer.current = setTimeout(() => {
+      activateDrag(date, touch.clientY, rect.top)
+      // Prevent scroll once drag activates
+      longPressTimer.current = null
+    }, LONG_PRESS_MS)
+  }
+
   const handleDragMove = useCallback((e: React.MouseEvent | React.TouchEvent) => {
+    // For touch: cancel long-press if finger moves too much before activation
+    if ('touches' in e && !dragRef.current?.active && touchStartPos.current) {
+      const touch = e.touches[0]
+      const dx = Math.abs(touch.clientX - touchStartPos.current.x)
+      const dy = Math.abs(touch.clientY - touchStartPos.current.y)
+      if (dx > 10 || dy > 10) {
+        cancelLongPress()
+        return
+      }
+    }
+
     if (!dragRef.current?.active) return
+    // Prevent scrolling while dragging on touch
+    if ('touches' in e) e.preventDefault()
+
     const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY
     const min = yToMinutes(clientY, dragRef.current.columnTop)
     const maxMin = (WORK_END - WORK_START) * 60
@@ -162,6 +201,8 @@ export default function CalendarPage() {
   }, [])
 
   const handleDragEnd = useCallback(() => {
+    cancelLongPress()
+
     if (!dragRef.current?.active || !dragPreview) {
       dragRef.current = null
       setDragPreview(null)
@@ -408,15 +449,16 @@ export default function CalendarPage() {
     return (
       <div
         key={dateISO}
-        className="relative select-none touch-none"
+        className="relative select-none"
         style={{ height: `${HOURS.length * HOUR_HEIGHT}px` }}
-        onMouseDown={(e) => handleDragStart(e, date)}
+        onMouseDown={(e) => handleMouseDown(e, date)}
         onMouseMove={handleDragMove}
         onMouseUp={handleDragEnd}
         onMouseLeave={() => { if (dragRef.current?.active) handleDragEnd() }}
-        onTouchStart={(e) => handleDragStart(e, date)}
+        onTouchStart={(e) => handleTouchStart(e, date)}
         onTouchMove={handleDragMove}
         onTouchEnd={handleDragEnd}
+        onTouchCancel={() => { cancelLongPress(); handleDragEnd() }}
       >
         {/* Hour grid lines */}
         {HOURS.map((hour) => (
