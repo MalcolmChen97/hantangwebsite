@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
@@ -11,8 +11,6 @@ import {
   endOfDay,
   isSameDay,
   isToday,
-  setHours,
-  setMinutes,
   differenceInMinutes,
   parseISO,
 } from 'date-fns'
@@ -99,6 +97,86 @@ export default function CalendarPage() {
   const [blockStart, setBlockStart] = useState('12:00')
   const [blockEnd, setBlockEnd] = useState('13:00')
   const [blockReason, setBlockReason] = useState('')
+
+  // Drag-to-select state
+  const dragRef = useRef<{
+    active: boolean
+    date: Date
+    startY: number
+    columnTop: number
+  } | null>(null)
+  const [dragPreview, setDragPreview] = useState<{
+    date: string // ISO
+    topMin: number // minutes from WORK_START
+    bottomMin: number
+  } | null>(null)
+
+  const SNAP_MINUTES = 15
+  const yToMinutes = (y: number, columnTop: number) => {
+    const rawMin = ((y - columnTop) / HOUR_HEIGHT) * 60
+    return Math.round(rawMin / SNAP_MINUTES) * SNAP_MINUTES
+  }
+
+  const minutesToTimeStr = (min: number) => {
+    const totalMin = WORK_START * 60 + min
+    const h = Math.floor(totalMin / 60)
+    const m = totalMin % 60
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+  }
+
+  const handleDragStart = (e: React.MouseEvent | React.TouchEvent, date: Date) => {
+    // Don't start drag on appointment clicks
+    if ((e.target as HTMLElement).closest('[data-apt]')) return
+    const column = (e.currentTarget as HTMLElement)
+    const rect = column.getBoundingClientRect()
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY
+    const min = yToMinutes(clientY, rect.top)
+    const clampedMin = Math.max(0, Math.min(min, (WORK_END - WORK_START) * 60 - SNAP_MINUTES))
+
+    dragRef.current = {
+      active: true,
+      date,
+      startY: clampedMin,
+      columnTop: rect.top,
+    }
+    setDragPreview({
+      date: date.toISOString(),
+      topMin: clampedMin,
+      bottomMin: clampedMin + SNAP_MINUTES,
+    })
+  }
+
+  const handleDragMove = useCallback((e: React.MouseEvent | React.TouchEvent) => {
+    if (!dragRef.current?.active) return
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY
+    const min = yToMinutes(clientY, dragRef.current.columnTop)
+    const maxMin = (WORK_END - WORK_START) * 60
+    const clampedMin = Math.max(0, Math.min(min, maxMin))
+
+    const startMin = dragRef.current.startY
+    setDragPreview({
+      date: dragRef.current.date.toISOString(),
+      topMin: Math.min(startMin, clampedMin),
+      bottomMin: Math.max(startMin + SNAP_MINUTES, clampedMin),
+    })
+  }, [])
+
+  const handleDragEnd = useCallback(() => {
+    if (!dragRef.current?.active || !dragPreview) {
+      dragRef.current = null
+      setDragPreview(null)
+      return
+    }
+
+    const date = dragRef.current.date
+    setNewAptDate(format(date, 'yyyy-MM-dd'))
+    setNewAptStartTime(minutesToTimeStr(dragPreview.topMin))
+    setNewAptEndTime(minutesToTimeStr(dragPreview.bottomMin))
+    setNewAptDialog(true)
+
+    dragRef.current = null
+    setDragPreview(null)
+  }, [dragPreview])
 
   const weekStart = startOfWeek(currentDate, { weekStartsOn: 1 })
   const weekEnd = endOfWeek(currentDate, { weekStartsOn: 1 })
@@ -289,13 +367,6 @@ export default function CalendarPage() {
 
   const goToday = () => setCurrentDate(new Date())
 
-  const openNewAptAtSlot = (date: Date, hour: number) => {
-    setNewAptDate(format(date, 'yyyy-MM-dd'))
-    setNewAptStartTime(`${String(hour).padStart(2, '0')}:00`)
-    setNewAptEndTime(`${String(hour + 1).padStart(2, '0')}:00`)
-    setNewAptDialog(true)
-  }
-
   const getAppointmentsForDay = useCallback(
     (date: Date) => appointments.filter((a) => isSameDay(parseISO(a.start_time), date)),
     [appointments]
@@ -331,18 +402,45 @@ export default function CalendarPage() {
   const renderDayColumn = (date: Date) => {
     const dayApts = getAppointmentsForDay(date)
     const dayBlocks = getBlockedTimesForDay(date)
+    const dateISO = date.toISOString()
+    const showPreview = dragPreview && dragPreview.date === dateISO
 
     return (
-      <div key={date.toISOString()} className="relative" style={{ height: `${HOURS.length * HOUR_HEIGHT}px` }}>
+      <div
+        key={dateISO}
+        className="relative select-none touch-none"
+        style={{ height: `${HOURS.length * HOUR_HEIGHT}px` }}
+        onMouseDown={(e) => handleDragStart(e, date)}
+        onMouseMove={handleDragMove}
+        onMouseUp={handleDragEnd}
+        onMouseLeave={() => { if (dragRef.current?.active) handleDragEnd() }}
+        onTouchStart={(e) => handleDragStart(e, date)}
+        onTouchMove={handleDragMove}
+        onTouchEnd={handleDragEnd}
+      >
         {/* Hour grid lines */}
         {HOURS.map((hour) => (
           <div
             key={hour}
-            className="absolute w-full border-t border-border/50 cursor-pointer hover:bg-muted/30 transition-colors"
+            className="absolute w-full border-t border-border/50"
             style={{ top: `${(hour - WORK_START) * HOUR_HEIGHT}px`, height: `${HOUR_HEIGHT}px` }}
-            onClick={() => openNewAptAtSlot(date, hour)}
           />
         ))}
+
+        {/* Drag preview */}
+        {showPreview && (
+          <div
+            className="absolute left-1 right-1 bg-primary/20 border-2 border-primary/50 rounded-md z-30 pointer-events-none flex items-center justify-center"
+            style={{
+              top: `${(dragPreview.topMin / 60) * HOUR_HEIGHT}px`,
+              height: `${Math.max(((dragPreview.bottomMin - dragPreview.topMin) / 60) * HOUR_HEIGHT, 20)}px`,
+            }}
+          >
+            <span className="text-xs font-medium text-primary">
+              {minutesToTimeStr(dragPreview.topMin)} - {minutesToTimeStr(dragPreview.bottomMin)}
+            </span>
+          </div>
+        )}
 
         {/* Blocked times */}
         {dayBlocks.map((bt) => (
@@ -364,11 +462,14 @@ export default function CalendarPage() {
           return (
             <div
               key={apt.id}
+              data-apt
               className={cn(
                 'absolute left-1 right-1 rounded-md px-1.5 py-0.5 cursor-pointer overflow-hidden border z-20 transition-shadow hover:shadow-md',
                 SERVICE_TYPE_COLORS[apt.service_type]
               )}
               style={getAptStyle(apt)}
+              onMouseDown={(e) => e.stopPropagation()}
+              onTouchStart={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation()
                 setViewAptDialog(apt)
@@ -598,20 +699,7 @@ export default function CalendarPage() {
                   type="date"
                   value={newAptDate}
                   onChange={(e) => setNewAptDate(e.target.value)}
-                  className="flex-1"
-                />
-                <Input
-                  type="time"
-                  value={newAptStartTime}
-                  onChange={(e) => setNewAptStartTime(e.target.value)}
-                  className="w-28"
-                />
-                <span className="text-muted-foreground text-sm">-</span>
-                <Input
-                  type="time"
-                  value={newAptEndTime}
-                  onChange={(e) => setNewAptEndTime(e.target.value)}
-                  className="w-28"
+                  className="min-w-0 flex-1"
                 />
                 <TimeSlotPicker
                   date={newAptDate}
@@ -619,10 +707,24 @@ export default function CalendarPage() {
                   onDateChange={setNewAptDate}
                   onTimeChange={(t) => {
                     setNewAptStartTime(t)
-                    // Auto-set end time to 1 hour later
                     const [h, m] = t.split(':').map(Number)
                     setNewAptEndTime(`${String(h + 1).padStart(2, '0')}:${String(m).padStart(2, '0')}`)
                   }}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="time"
+                  value={newAptStartTime}
+                  onChange={(e) => setNewAptStartTime(e.target.value)}
+                  className="min-w-0 flex-1"
+                />
+                <span className="text-muted-foreground text-sm shrink-0">-</span>
+                <Input
+                  type="time"
+                  value={newAptEndTime}
+                  onChange={(e) => setNewAptEndTime(e.target.value)}
+                  className="min-w-0 flex-1"
                 />
               </div>
             </div>
@@ -778,13 +880,13 @@ export default function CalendarPage() {
                           type="date"
                           value={rescheduleDate}
                           onChange={(e) => setRescheduleDate(e.target.value)}
-                          className="flex-1"
+                          className="min-w-0 flex-1"
                         />
                         <Input
                           type="time"
                           value={rescheduleTime}
                           onChange={(e) => setRescheduleTime(e.target.value)}
-                          className="w-28"
+                          className="min-w-0 flex-1"
                         />
                         <TimeSlotPicker
                           date={rescheduleDate}

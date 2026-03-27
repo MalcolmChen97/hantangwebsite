@@ -609,13 +609,13 @@ export default function PatientDetailPage() {
                   type="date"
                   value={aptDate}
                   onChange={(e) => setAptDate(e.target.value)}
-                  className="flex-1"
+                  className="min-w-0 flex-1"
                 />
                 <Input
                   type="time"
                   value={aptTime}
                   onChange={(e) => setAptTime(e.target.value)}
-                  className="w-28"
+                  className="min-w-0 flex-1"
                 />
                 <TimeSlotPicker
                   date={aptDate}
